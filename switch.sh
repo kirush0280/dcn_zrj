@@ -1,5 +1,13 @@
 #!/bin/bash
 
+# Загрузка конфигурации
+CONFIG_FILE="./config.ini"
+if [ ! -f "$CONFIG_FILE" ]; then
+    echo "Ошибка: Файл конфигурации $CONFIG_FILE не найден"
+    exit 1
+fi
+source "$CONFIG_FILE"
+
 # Конфигурационные параметры для разных моделей
 declare -A FIRMWARE_PATHS
 declare -A CONFIG_PATHS
