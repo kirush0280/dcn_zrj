@@ -5,6 +5,9 @@ declare -A FIRMWARE_PATHS
 declare -A CONFIG_PATHS
 declare -A SERIAL_SETTINGS
 
+# Массив возможных приветствий (общий для всех моделей)
+SWITCH_PROMPTS=("S42-8G2S#" "S4600#")
+
 # DCN S4600-10P-SI
 FIRMWARE_PATHS["DCN_S4600_10P_SI"]="/4600/S4600-XXP(-P)-SI-10.9.11-vendor_V702R101C005B012_nos.img"
 CONFIG_PATHS["DCN_S4600_10P_SI"]="/dcn4600-10.cfg"
@@ -153,41 +156,45 @@ send "admin\r"
 expect "Password:"
 send "admin\r"
 
-# Ожидание приглашения командной строки
-expect "S42-8G2S#"
+# Создаем строку для expect с альтернативными вариантами приветствия
+set prompt_pattern "$(printf '%s|' "${SWITCH_PROMPTS[@]}")"
+set prompt_pattern [string range \$prompt_pattern 0 end-1]
+
+# Ожидание приглашения командной строки (любого из списка)
+expect -re "\$prompt_pattern"
 
 # Настройка IP-адреса
 send "conf\r"
-expect "S42-8G2S(config)#"
+expect "(config)#"
 send "interface vlan 1\r"
-expect "S42-8G2S(config-if-vlan1)#"
+expect "(config-if-vlan1)#"
 send "ip address 192.168.1.20 255.255.255.0\r"
-expect "S42-8G2S(config-if-vlan1)#"
+expect "(config-if-vlan1)#"
 send "exit\r"
-expect "S42-8G2S(config)#"
+expect "(config)#"
 send "exit\r"
-expect "S42-8G2S#"
+expect -re "\$prompt_pattern"
 
 # Загрузка и установка прошивки
 send "copy \$firmware_url nos.img\r"
 expect "\[Y/N\]"
 sleep 1
 send "Y\r"
-expect "S42-8G2S#"
+expect -re "\$prompt_pattern"
 
 # Сохранение базовой конфигурации
 send "write\r"
 expect "\[Y/N\]"
 send "Y\r"
-expect "S42-8G2S#"
+expect -re "\$prompt_pattern"
 
 # Загрузка предварительно настроенного конфига
 send "copy \$config_url startup.cfg\r"
 expect "\[Y/N\]"
 send "Y\r"
-expect "S42-8G2S#"
+expect -re "\$prompt_pattern"
 send "exit\r"
-expect "S42-8G2S#"
+expect -re "\$prompt_pattern"
 
 # Выход из cu (используем специальную последовательность ~.)
 send "~."
