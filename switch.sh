@@ -1,30 +1,28 @@
 #!/bin/bash
 
-# Загрузка конфигурации
-CONFIG_FILE="./config.ini"
-if [ ! -f "$CONFIG_FILE" ]; then
-    echo "Ошибка: Файл конфигурации $CONFIG_FILE не найден"
-    exit 1
-fi
-source "$CONFIG_FILE"
-
 # Конфигурационные параметры для разных моделей
 declare -A FIRMWARE_PATHS
 declare -A CONFIG_PATHS
 declare -A SERIAL_SETTINGS
-
-# Массив возможных приветствий (общий для всех моделей)
-SWITCH_PROMPTS=("S42-8G2S#" "S4600#")
+declare -A SWITCH_PROMPTS
 
 # DCN S4600-10P-SI
 FIRMWARE_PATHS["DCN_S4600_10P_SI"]="/4600/S4600-XXP(-P)-SI-10.9.11-vendor_V702R101C005B012_nos.img"
-CONFIG_PATHS["DCN_S4600_10P_SI"]="/dcn4600-10.cfg"
+CONFIG_PATHS["DCN_S4600_10P_SI"]="/4600-10.cfg"
 SERIAL_SETTINGS["DCN_S4600_10P_SI"]="9600,cs8,-parenb,-cstopb,-hupcl"
+SWITCH_PROMPTS["DCN_S4600_10P_SI"]="S4600-10P-SI#"
+
+# DCN S3900E-28P-SI
+FIRMWARE_PATHS["DCN_S3900E_28P_SI"]="/4600/S4600-XXP(-P)-SI-10.9.11-vendor_V702R101C005B012_nos.img"
+CONFIG_PATHS["DCN_S3900E_28P_SI"]="/4600-28.cfg"
+SERIAL_SETTINGS["DCN_S3900E_28P_SI"]="9600,cs8,-parenb,-cstopb,-hupcl"
+SWITCH_PROMPTS["DCN_S3900E_28P_SI"]="S3900E-28P-SI>"
 
 # ZRJ S42-8G2S
 FIRMWARE_PATHS["ZRJ_S42_8G2S"]="/ZRJ/S46-S42/ZRJ-S46-S42-IS42-10.30.137-vendor_V702R101C009B004_nos.img"
 CONFIG_PATHS["ZRJ_S42_8G2S"]="/4600-10.cfg"
 SERIAL_SETTINGS["ZRJ_S42_8G2S"]="9600,cs8,-parenb,-cstopb,-hupcl"
+SWITCH_PROMPTS["ZRJ_S42_8G2S"]="S42-8G2S#"
 
 # Общие параметры
 TFTP_SERVER="192.168.1.111"
@@ -38,43 +36,52 @@ NC='\033[0m' # No Color
 # Функция выбора производителя и модели
 select_switch_model() {
     echo -e "${GREEN}=== Инструмент настройки коммутаторов DCN/ZRJ ===${NC}"
+    
+    # Создаем массивы для хранения моделей по производителям
+    declare -A vendor_models
+    for model in "${!FIRMWARE_PATHS[@]}"; do
+        vendor="${model%%_*}"  # Получаем имя производителя (часть до первого _)
+        vendor_models[$vendor]+=" $model"
+    done
+    
+    # Формируем список производителей
+    vendors=($(echo "${!vendor_models[@]}" | tr ' ' '\n' | sort | tr '\n' ' '))
+    
     echo -e "${YELLOW}Выберите производителя:${NC}"
-    select vendor in "DCN" "ZRJ" "Выход"; do
+    select vendor in "${vendors[@]}" "Выход"; do
         case $vendor in
-            "DCN")
-                echo -e "${YELLOW}Выберите модель DCN:${NC}"
-                select model in "S4600-10P-SI" "Назад"; do
-                    case $model in
-                        "S4600-10P-SI")
-                            echo "Выбран коммутатор DCN S4600-10P-SI"
-                            CURRENT_MODEL="DCN_S4600_10P_SI"
-                            return 0
-                            ;;
-                        "Назад")
-                            select_switch_model
-                            return $?
-                            ;;
-                    esac
-                done
-                ;;
-            "ZRJ")
-                echo -e "${YELLOW}Выберите модель ZRJ:${NC}"
-                select model in "S42-8G2S" "Назад"; do
-                    case $model in
-                        "S42-8G2S")
-                            echo "Выбран коммутатор ZRJ S42-8G2S"
-                            CURRENT_MODEL="ZRJ_S42_8G2S"
-                            return 0
-                            ;;
-                        "Назад")
-                            select_switch_model
-                            return $?
-                            ;;
-                    esac
-                done
-                ;;
             "Выход")
                 return 1
+                ;;
+            *)
+                if [ -n "$vendor" ]; then
+                    echo -e "${YELLOW}Выберите модель ${vendor}:${NC}"
+                    # Получаем список моделей для выбранного производителя и преобразуем их в читаемый формат
+                    models=()
+                    for full_model in ${vendor_models[$vendor]}; do
+                        # Преобразуем формат DCN_S4600_10P_SI в S4600-10P-SI
+                        readable_model=$(echo ${full_model#${vendor}_} | tr '_' '-')
+                        models+=("$readable_model")
+                    done
+                    
+                    select model in "${models[@]}" "Назад"; do
+                        case $model in
+                            "Назад")
+                                select_switch_model
+                                return $?
+                                ;;
+                            *)
+                                if [ -n "$model" ]; then
+                                    # Преобразуем обратно в формат для CURRENT_MODEL
+                                    internal_model="${vendor}_$(echo $model | tr '-' '_')"
+                                    echo "Выбран коммутатор ${vendor} ${model}"
+                                    CURRENT_MODEL="$internal_model"
+                                    return 0
+                                fi
+                                ;;
+                        esac
+                    done
+                fi
                 ;;
         esac
     done
@@ -129,6 +136,14 @@ set timeout 300
 set port [lindex \$argv 0]
 set firmware_url "tftp://${TFTP_SERVER}${FIRMWARE_PATHS[$CURRENT_MODEL]}"
 set config_url "tftp://${TFTP_SERVER}${CONFIG_PATHS[$CURRENT_MODEL]}"
+set initial_prompt "${SWITCH_PROMPTS[$CURRENT_MODEL]}"
+
+# Получаем базовое имя коммутатора (без # или >)
+set switch_name [string range \$initial_prompt 0 end-1]
+# Определяем, нужен ли enable
+set needs_enable [string equal [string index \$initial_prompt end] ">"]
+# Формируем привилегированный промпт
+set privileged_prompt "\${switch_name}#"
 
 # Подключение через cu
 log_user 1
@@ -136,43 +151,59 @@ spawn cu -l \$port -s 9600
 
 # Проверка успешности подключения
 expect {
-    "timeout" {
-        puts "CONNECT_ERROR: Не удалось подключиться к порту"
-        exit 1
+    "Connected" {
+        sleep 2
+        send "\r"
     }
     eof {
         puts "CONNECT_ERROR: Соединение прервано"
         exit 1
     }
-    "Connected" {
-        sleep 2
-        send "\r"
-    }
 }
 
-# Проверяем что появилось первым: Password или Username
+# Отправляем Enter несколько раз для синхронизации
+send "\r"
+sleep 1
+send "\r"
+sleep 1
+
+# Ожидаем либо запрос логина, либо сообщения загрузки, либо промпт
+set timeout 10
 expect {
-    "Password:" {
-        send "\r"
-        expect "Username:"
+    "Username:" {
+        send "admin\r"
+        expect "Password:"
+        send "admin\r"
+        expect -re "\[^\r\n]*\$initial_prompt"
     }
-    "Username:" { }
+    "%LINEPROTO-5-UPDOWN:" {
+        expect -re "\[^\r\n]*\$initial_prompt"
+    }
+    -re "\[^\r\n]*\$initial_prompt" {}
+    eof {
+        puts "CONNECT_ERROR: Соединение прервано"
+        exit 1
+    }
 }
 
-# Ввод учетных данных
-send "admin\r"
-expect "Password:"
-send "admin\r"
-
-# Создаем строку для expect с альтернативными вариантами приветствия
-set prompt_pattern "$(printf '%s|' "${SWITCH_PROMPTS[@]}")"
-set prompt_pattern [string range \$prompt_pattern 0 end-1]
-
-# Ожидание приглашения командной строки (любого из списка)
-expect -re "\$prompt_pattern"
+# Если промпт заканчивается на ">", выполняем enable
+if {\$needs_enable} {
+    send "enable\r"
+    expect {
+        "Password:" {
+            send "admin\r"
+            expect -re "\[^\r\n]*\$privileged_prompt"
+        }
+        -re "\[^\r\n]*\$privileged_prompt" {}
+        eof {
+            puts "CONNECT_ERROR: Соединение прервано"
+            exit 1
+        }
+    }
+}
 
 # Настройка IP-адреса
-send "conf\r"
+send "conf t\r"
 expect "(config)#"
 send "interface vlan 1\r"
 expect "(config-if-vlan1)#"
@@ -181,32 +212,195 @@ expect "(config-if-vlan1)#"
 send "exit\r"
 expect "(config)#"
 send "exit\r"
-expect -re "\$prompt_pattern"
+expect -re "\[^\r\n]*\$privileged_prompt"
 
 # Загрузка и установка прошивки
 send "copy \$firmware_url nos.img\r"
 expect "\[Y/N\]"
 sleep 1
 send "Y\r"
-expect -re "\$prompt_pattern"
+
+# Ждем начала загрузки
+expect {
+    "Begin to receive file, please wait..." {}
+    eof {
+        puts "CONNECT_ERROR: Соединение прервано"
+        exit 1
+    }
+}
+
+# Ждем получения размера файла
+expect {
+    -re "Get Img file size success, Img file size is:(\[0-9\]+)" {}
+    eof {
+        puts "CONNECT_ERROR: Соединение прервано"
+        exit 1
+    }
+}
+
+# Ждем завершения загрузки, увеличиваем таймаут
+set timeout 600
+expect {
+    -re "100%|#+" {}
+    eof {
+        puts "CONNECT_ERROR: Соединение прервано"
+        exit 1
+    }
+}
+
+# Ждем возврата промпта после загрузки
+expect {
+    -re "\[^\r\n]*\$privileged_prompt" {}
+    eof {
+        puts "CONNECT_ERROR: Соединение прервано"
+        exit 1
+    }
+}
 
 # Сохранение базовой конфигурации
 send "write\r"
 expect "\[Y/N\]"
 send "Y\r"
-expect -re "\$prompt_pattern"
+# Ждем сообщения об успешном сохранении
+expect {
+    -re "Write.*successful" {
+        # Отправляем Enter после успешной записи
+        sleep 1
+        send "\r"
+        expect -re "\[^\r\n]*\$privileged_prompt"
+    }
+    eof {
+        puts "CONNECT_ERROR: Соединение прервано"
+        exit 1
+    }
+}
 
 # Загрузка предварительно настроенного конфига
 send "copy \$config_url startup.cfg\r"
-expect "\[Y/N\]"
-send "Y\r"
-expect -re "\$prompt_pattern"
-send "exit\r"
-expect -re "\$prompt_pattern"
+expect {
+    "\[Y/N\]" {
+        send "Y\r"
+        expect {
+            "Begin to receive file, please wait..." {}
+            eof {
+                puts "CONNECT_ERROR: Соединение прервано при загрузке конфига"
+                exit 1
+            }
+        }
+        # Ждем завершения загрузки конфига
+        expect {
+            -re "File transfer complete|Write ok" {
+                sleep 1
+                send "\r"
+                expect -re "\[^\r\n]*\$privileged_prompt"
+            }
+            eof {
+                puts "CONNECT_ERROR: Соединение прервано при загрузке конфига"
+                exit 1
+            }
+        }
+    }
+    eof {
+        puts "CONNECT_ERROR: Соединение прервано"
+        exit 1
+    }
+}
 
-# Выход из cu (используем специальную последовательность ~.)
-send "~."
-expect eof
+# Перезагружаем коммутатор для применения конфигурации
+send "reload\r"
+expect {
+    "Process with reboot? \[Y/N\]" {
+        sleep 2
+        send "Y\r"
+        expect {
+            "System now is rebooting" {}
+            "Rebooting" {}
+            "Disconnected" {}
+            eof {}
+            timeout {
+                # Если не получили ответ, пробуем отправить Y еще раз
+                send "Y\r"
+                expect {
+                    "System now is rebooting" {}
+                    "Rebooting" {}
+                    "Disconnected" {}
+                    eof {}
+                }
+            }
+        }
+    }
+    "Process with reboot?" {
+        sleep 2
+        send "Y\r"
+        expect {
+            "System now is rebooting" {}
+            "Rebooting" {}
+            "Disconnected" {}
+            eof {}
+            timeout {
+                # Если не получили ответ, пробуем отправить Y еще раз
+                send "Y\r"
+                expect {
+                    "System now is rebooting" {}
+                    "Rebooting" {}
+                    "Disconnected" {}
+                    eof {}
+                }
+            }
+        }
+    }
+    -re "System will be rebooted.*\[Y/N\]:" {
+        sleep 2
+        send "Y\r"
+        expect {
+            "System now is rebooting" {}
+            "Rebooting" {}
+            "Disconnected" {}
+            eof {}
+            timeout {
+                # Если не получили ответ, пробуем отправить Y еще раз
+                send "Y\r"
+                expect {
+                    "System now is rebooting" {}
+                    "Rebooting" {}
+                    "Disconnected" {}
+                    eof {}
+                }
+            }
+        }
+    }
+    eof {
+        puts "CONNECT_ERROR: Соединение прервано"
+        exit 1
+    }
+}
+
+# На случай, если перезагрузка не произошла, пробуем еще раз
+expect {
+    -re "\[^\r\n]*\$privileged_prompt" {
+        send "reload\r"
+        expect {
+            "Process with reboot? \[Y/N\]" {
+                sleep 2
+                send "Y\r"
+                expect {
+                    "System now is rebooting" {}
+                    "Rebooting" {}
+                    "Disconnected" {}
+                    eof {}
+                    timeout {
+                        # Если не получили ответ, пробуем отправить Y еще раз
+                        send "Y\r"
+                    }
+                }
+            }
+        }
+    }
+    "Disconnected" {}
+    eof {}
+}
+
+exit 0
 EOF
 
 # Делаем expect скрипт исполняемым
